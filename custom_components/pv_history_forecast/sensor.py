@@ -8,9 +8,11 @@ import math
 import copy
 import random
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any, Mapping
 
+from astral import Observer
+from astral.sun import elevation as astral_elevation, sun as astral_sun
 from homeassistant.components.sensor import (
     SensorEntity,
     SensorStateClass,
@@ -25,6 +27,7 @@ from homeassistant.helpers.template import Template
 from homeassistant.helpers.entity import generate_entity_id
 from homeassistant.helpers.event import async_call_later, async_track_state_change_event
 from homeassistant.helpers.restore_state import RestoreEntity
+from homeassistant.util import dt as dt_util
 from sqlalchemy import create_engine, text
 
 from . import const as _const
@@ -49,6 +52,7 @@ from .const import (
     DEFAULT_VALUE_TEMPLATE_MIN,
     DEFAULT_VALUE_TEMPLATE_MAX,
     DEFAULT_VALUE_TEMPLATE_TOMORROW,
+    DEFAULT_VALUE_TEMPLATE_DAY_AFTER_TOMORROW,
     DEFAULT_LOVELACE_TEMPLATE_REMAINING_TODAY,
     DEFAULT_LOVELACE_TEMPLATE_TOMORROW,
     DEFAULT_SQL_QUERY,
@@ -412,6 +416,14 @@ async def async_setup_entry(
         value_template=DEFAULT_VALUE_TEMPLATE_TOMORROW,
         no_ema=True,
     )
+    day_after_tomorrow_sensor = PVForecastTemplateSensor(
+        hass=hass,
+        config_entry=config_entry,
+        main_entity_id=main_entity_id,
+        name=f"{prefix}_day_after_tomorrow",
+        value_template=DEFAULT_VALUE_TEMPLATE_DAY_AFTER_TOMORROW,
+        no_ema=True,
+    )
 
     # Weather forecast helper sensor
     weather_sensor = WeatherForecastSensor(
@@ -421,7 +433,24 @@ async def async_setup_entry(
         prefix=prefix,
     )
 
-    entities = [sql_sensor, min_sensor, max_sensor, tomorrow_sensor]
+    hourly_sensor = HourlyForecastSensor(
+        hass=hass,
+        config_entry=config_entry,
+        prefix=prefix,
+        main_entity_id=main_entity_id,
+        tomorrow_entity_id=f"sensor.{prefix}_tomorrow",
+        day_after_tomorrow_entity_id=f"sensor.{prefix}_day_after_tomorrow",
+        coordinator=coordinator,
+    )
+
+    entities = [
+        sql_sensor,
+        min_sensor,
+        max_sensor,
+        tomorrow_sensor,
+        day_after_tomorrow_sensor,
+        hourly_sensor,
+    ]
 
 
     precipitation_sensor = PrecipitationSensor(
@@ -2699,3 +2728,284 @@ class CloudForecastSensor(SensorEntity, RestoreEntity):
     @property
     def update_interval(self) -> timedelta | None:
         return timedelta(minutes=5)
+
+
+def _first_not_none(*values: Any) -> Any:
+    """Return the first argument that is not None (0.0 is a valid result)."""
+    for value in values:
+        if value is not None:
+            return value
+    return None
+
+
+class HourlyForecastSensor(SensorEntity):
+    """Hourly-resolution PV forecast for the next 48 hours.
+
+    Home Assistant's own recorder/statistics only ever give this integration two
+    numbers per day (``remaining`` and ``total``), so there is no historical
+    hourly *shape* to mine. Instead this sensor disaggregates the already
+    weather-matched daily totals (remaining_today / tomorrow / day_after_tomorrow)
+    across hours using a sun-elevation clear-sky curve, attenuated per hour by
+    the forecast cloud cover already cached on the weather coordinator. This
+    keeps the trusted daily totals authoritative and only adds a shape on top.
+
+    Designed to be read by external tools (e.g. evcc's HTTP solar forecast
+    plugin) via the ``forecast`` attribute: a list of
+    ``{"start": iso8601, "end": iso8601, "value": watts}`` covering the next
+    48 hours starting at the top of the current local hour.
+    """
+
+    _HOURS = 48
+    _CLOUD_ATTENUATION_MIN = 0.15
+    _CLOUD_ATTENUATION_PER_PERCENT = 0.009
+    _UPDATE_THROTTLE = timedelta(minutes=10)
+
+    _attr_icon = "mdi:sun-clock"
+    _attr_native_unit_of_measurement = "kWh"
+    _attr_device_class = "energy"
+    _attr_state_class = None
+
+    def __init__(
+        self,
+        hass: HomeAssistant,
+        config_entry: ConfigEntry,
+        prefix: str,
+        main_entity_id: str,
+        tomorrow_entity_id: str,
+        day_after_tomorrow_entity_id: str,
+        coordinator: WeatherCoordinator | None,
+    ) -> None:
+        """Initialize the hourly forecast sensor."""
+        self.hass = hass
+        self.config_entry = config_entry
+        self._main_entity_id = main_entity_id
+        self._tomorrow_entity_id = tomorrow_entity_id
+        self._day_after_tomorrow_entity_id = day_after_tomorrow_entity_id
+        self._coordinator = coordinator
+        name = f"{prefix}_hourly_forecast"
+        self._attr_name = name
+        self._attr_unique_id = f"{DOMAIN}_{config_entry.entry_id}_{name}"
+        self._attr_native_value = None
+        self._attr_available = False
+        self._forecast_entries: list[dict[str, Any]] = []
+        self._used_day2_fallback = False
+        self._generated_at: str | None = None
+        self._last_update_time: datetime | None = None
+        self.entity_id = generate_entity_id("sensor.{}", name, hass=hass)
+
+    @staticmethod
+    def _state_float(state) -> float | None:
+        """Read a numeric entity state, treating unknown/unavailable as missing."""
+        if state is None or state.state in ("unknown", "unavailable", ""):
+            return None
+        try:
+            return float(state.state)
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _clear_sky_weight(observer: Observer, dt_utc: datetime) -> float:
+        """Relative clear-sky irradiance proxy from sun elevation (0 below horizon)."""
+        try:
+            elev = astral_elevation(observer, dt_utc)
+        except Exception:  # noqa: BLE001  (astral raises plain Exception/ValueError)
+            return 0.0
+        return max(math.sin(math.radians(elev)), 0.0)
+
+    @staticmethod
+    def _sun_bounds(observer: Observer, day: date) -> tuple[datetime, datetime] | None:
+        """Return (sunrise, sunset) in UTC for *day*, or None (e.g. polar day/night)."""
+        try:
+            bounds = astral_sun(observer, date=day, tzinfo=timezone.utc)
+            return bounds["sunrise"], bounds["sunset"]
+        except Exception:  # noqa: BLE001
+            return None
+
+    @staticmethod
+    def _cloud_pct_for_hour(
+        forecast_list: list, bucket_start_utc: datetime, fallback_pct: float
+    ) -> float:
+        """Nearest forecasted cloud_coverage (%) for the hour, or *fallback_pct*."""
+        best_value: float | None = None
+        best_delta = timedelta(minutes=31)
+        for entry in forecast_list:
+            raw_dt = entry.get("datetime") if isinstance(entry, dict) else None
+            if not raw_dt:
+                continue
+            try:
+                entry_dt = datetime.fromisoformat(raw_dt)
+            except (TypeError, ValueError):
+                continue
+            if entry_dt.tzinfo is None:
+                entry_dt = entry_dt.replace(tzinfo=timezone.utc)
+            delta = abs(entry_dt.astimezone(timezone.utc) - bucket_start_utc)
+            if delta < best_delta:
+                cloud = resolve_forecast_field_value(entry, "cloud_coverage")
+                if cloud is not None:
+                    best_delta = delta
+                    best_value = cloud
+        if best_value is None:
+            return fallback_pct
+        return max(0.0, min(100.0, float(best_value)))
+
+    def _hourly_kwh_for_day(
+        self,
+        day_total_kwh: float,
+        window_start_utc: datetime,
+        sunrise_utc: datetime,
+        sunset_utc: datetime,
+        observer: Observer,
+        forecast_list: list,
+        fallback_cloud_pct: float,
+    ) -> dict[datetime, float]:
+        """Spread *day_total_kwh* across whole-hour buckets from window_start to sunset.
+
+        Weighting is clear-sky (sun elevation) times a cloud-cover attenuation,
+        normalized to sum to 1 across the included hours so the day's forecast
+        total is preserved exactly, regardless of shape.
+        """
+        effective_start = max(window_start_utc, sunrise_utc)
+        if effective_start >= sunset_utc or day_total_kwh <= 0:
+            return {}
+
+        hour = effective_start.replace(minute=0, second=0, microsecond=0)
+        raw_weights: dict[datetime, float] = {}
+        while hour < sunset_utc:
+            midpoint = hour + timedelta(minutes=30)
+            clear_sky = self._clear_sky_weight(observer, midpoint)
+            cloud_pct = self._cloud_pct_for_hour(forecast_list, hour, fallback_cloud_pct)
+            attenuation = max(
+                self._CLOUD_ATTENUATION_MIN,
+                1.0 - self._CLOUD_ATTENUATION_PER_PERCENT * cloud_pct,
+            )
+            raw_weights[hour] = clear_sky * attenuation
+            hour += timedelta(hours=1)
+
+        total_weight = sum(raw_weights.values())
+        if total_weight <= 0:
+            return {}
+        return {h: (w / total_weight) * day_total_kwh for h, w in raw_weights.items()}
+
+    async def async_update(self) -> None:
+        """Recompute the 48h series from the daily forecasts + weather shape."""
+        now = datetime.now()
+        if (
+            self._last_update_time is not None
+            and (now - self._last_update_time) < self._UPDATE_THROTTLE
+        ):
+            return
+        self._last_update_time = now
+
+        main_state = self.hass.states.get(self._main_entity_id)
+        remaining_today_val = self._state_float(main_state)
+        tomorrow_val = self._state_float(self.hass.states.get(self._tomorrow_entity_id))
+        day2_val = self._state_float(
+            self.hass.states.get(self._day_after_tomorrow_entity_id)
+        )
+        used_day2_fallback = False
+        if day2_val is None:
+            day2_val = tomorrow_val
+            used_day2_fallback = tomorrow_val is not None
+
+        if remaining_today_val is None and tomorrow_val is None:
+            self._attr_available = self._attr_native_value is not None
+            return
+
+        forecast_data: dict[str, Any] = {}
+        raw_json = main_state.attributes.get("json") if main_state is not None else None
+        if raw_json:
+            try:
+                parsed = json.loads(raw_json)
+                if isinstance(parsed, dict):
+                    forecast_data = parsed.get("forecast") or {}
+            except (TypeError, ValueError):
+                forecast_data = {}
+
+        forecast_list: list = []
+        if self._coordinator is not None and self._coordinator.data:
+            forecast_list = self._coordinator.data.get("forecast", []) or []
+
+        observer = Observer(
+            latitude=self.hass.config.latitude,
+            longitude=self.hass.config.longitude,
+            elevation=self.hass.config.elevation or 0,
+        )
+
+        now_utc = dt_util.utcnow().replace(minute=0, second=0, microsecond=0)
+        today_local = dt_util.now().date()
+        tomorrow_local = today_local + timedelta(days=1)
+        day2_local = today_local + timedelta(days=2)
+
+        day_totals: dict[date, float] = {}
+        if remaining_today_val is not None:
+            day_totals[today_local] = remaining_today_val
+        if tomorrow_val is not None:
+            day_totals[tomorrow_local] = tomorrow_val
+        if day2_val is not None:
+            day_totals[day2_local] = day2_val
+
+        remaining_cloud = (forecast_data.get("remaining") or {}).get("cloud")
+        next_day_cloud = (forecast_data.get("next_day_total") or {}).get("cloud")
+        day2_cloud = (forecast_data.get("day2_total") or {}).get("cloud")
+        fallback_cloud = {
+            today_local: _first_not_none(remaining_cloud, 50.0),
+            tomorrow_local: _first_not_none(next_day_cloud, 50.0),
+            day2_local: _first_not_none(day2_cloud, next_day_cloud, 50.0),
+        }
+
+        hourly_kwh_by_start: dict[datetime, float] = {}
+        for day, total_kwh in day_totals.items():
+            bounds = self._sun_bounds(observer, day)
+            if bounds is None:
+                continue
+            sunrise_utc, sunset_utc = bounds
+            window_start = now_utc if day == today_local else sunrise_utc
+            hourly_kwh_by_start.update(
+                self._hourly_kwh_for_day(
+                    total_kwh,
+                    window_start,
+                    sunrise_utc,
+                    sunset_utc,
+                    observer,
+                    forecast_list,
+                    fallback_cloud.get(day, 50.0),
+                )
+            )
+
+        entries: list[dict[str, Any]] = []
+        for i in range(self._HOURS):
+            bucket_start_utc = now_utc + timedelta(hours=i)
+            bucket_end_utc = bucket_start_utc + timedelta(hours=1)
+            kwh = hourly_kwh_by_start.get(bucket_start_utc, 0.0)
+            value_w = max(0, round(kwh * 1000))
+            entries.append(
+                {
+                    "start": dt_util.as_local(bucket_start_utc).isoformat(),
+                    "end": dt_util.as_local(bucket_end_utc).isoformat(),
+                    "value": value_w,
+                }
+            )
+
+        self._forecast_entries = entries
+        self._used_day2_fallback = used_day2_fallback
+        self._generated_at = dt_util.as_local(now).isoformat()
+        self._attr_native_value = round(sum(e["value"] for e in entries[:24]) / 1000.0, 2)
+        self._attr_available = True
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        """Expose the hourly series (Watts) for consumption by external tools."""
+        return {
+            "forecast": self._forecast_entries,
+            "forecast_unit": "W",
+            "generated_at": self._generated_at,
+            "day_after_tomorrow_is_fallback": self._used_day2_fallback,
+        }
+
+    @property
+    def should_poll(self) -> bool:
+        return True
+
+    @property
+    def update_interval(self) -> timedelta | None:
+        return self._UPDATE_THROTTLE
