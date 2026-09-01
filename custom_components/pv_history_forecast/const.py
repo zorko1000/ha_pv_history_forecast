@@ -1243,6 +1243,10 @@ SELECT json_object(
     'pv_activity', (SELECT json_object('sun_start', sun_start, 'sun_end', sun_end, 'sun_start_local', sun_start_local, 'sun_end_local', sun_end_local) FROM pv_activity),
     'forecast', (SELECT json_object('remaining', json_object('cloud', cloud_remaining, 'uv', uv_remaining, 'temp', temp_remaining, 'precip', precip_remaining), 'next_day_total', json_object('cloud', next_cloud_total, 'uv', next_uv_total, 'temp', next_temp_total, 'precip', next_precip_total), 'day2_total', json_object('cloud', day2_cloud_total, 'uv', day2_uv_total, 'temp', day2_temp_total, 'precip', day2_precip_total)) FROM forecast),
     'live_hour_delta', (SELECT live_hour_delta FROM pv_live_current_hour_delta),
+    -- Actual PV yield produced so far today (statistics-based, same source the HA
+    -- Energy dashboard uses), lagging up to an hour behind; combined with
+    -- live_hour_delta by the today sensor for a near-live total.
+    'today_actual', (SELECT ROUND(COALESCE(pv_yield_total, 0.0), 2) FROM pv_daily_totals WHERE day_string = date('now', (SELECT offset FROM vars))),
     'daily_summary', (SELECT metrics_array FROM json_output_assembly)
 ) as value;"""
 

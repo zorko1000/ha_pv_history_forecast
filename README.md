@@ -61,6 +61,17 @@ content: >-
 
   {{ state_attr('sensor.pv_hist_remaining_today', 'lovelace_card_tomorrow') }}
 ```
+
+`sensor.pv_hist_today` adds `sensor.pv_hist_remaining_today` to today's actual PV production so far (the
+same figure shown in the Energy dashboard), giving a single "kWh for today" sensor with the same shape as
+`sensor.pv_hist_tomorrow` — handy for dashboards that expect a consistent sensor per day, like
+`clock-pv-forecast-card`:
+```yaml
+type: markdown
+content: >-
+  Forecast total for today: <b><big>{{ states.sensor.pv_hist_today.state | round(2)}} kWh</big></b>
+```
+
 If you are not using the default prefix, you will need to adjust the names.
 
 <table><tr>
