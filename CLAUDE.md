@@ -30,6 +30,17 @@ There is no linter/formatter config in the repo. CI (GitHub Actions) runs `hacs/
 structure validation) and `home-assistant/actions/hassfest` — both cloud-side against `manifest.json`/
 `hacs.json`, not runnable locally in a meaningful way.
 
+To try an unreleased branch/PR against a live Home Assistant instance before it's merged (HACS can only
+track releases, not branches), [scripts/deploy.sh](scripts/deploy.sh) exports `custom_components/`
+from a given git ref via `git archive`, `scp`s it to `/config/custom_components/pv_history_forecast/`
+over SSH, then runs `ha core restart` on the target:
+```bash
+scripts/deploy.sh [ref] [--host HOST] [--dry-run]   # ref defaults to HEAD, host to `homeassistant`
+```
+It only ships committed state (uncommitted changes are never included) and only checks the ref against
+your local working tree — it has no idea what's actually installed on the target, so it can't catch a
+regression against what's live. See the script's own header comment for that caveat.
+
 [sql_integration_query_tests/](sql_integration_query_tests/) is **not** part of the automated test
 suite — it's a folder of standalone `.sql`/`.py` scratch scripts used to manually test query fragments
 against a copy of a real `home-assistant_v2.db`, kept for reference when editing `DEFAULT_SQL_QUERY`.
