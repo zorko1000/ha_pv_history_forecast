@@ -1319,3 +1319,67 @@ DEFAULT_LOVELACE_TEMPLATE_TOMORROW = DEFAULT_VALUE_TEMPLATE_TOMORROW.replace(
 {% endfor %}
 <small>Relevance combines clouds, UV, temperature, rain and recency bonus (age). Yields are adjusted by day length (Astro) and temperature.</small>"""
 ).replace("__HELP_URL__", HELP_URL)
+
+# Markdown card for the 48h hourly forecast (sensor.<prefix>_hourly_forecast).
+# Renders a unicode-block sparkline directly from the sensor's own `forecast`
+# attribute (a plain list of {start, end, value} dicts, not a JSON string like
+# the SQL-backed sensors above), so no from_json/raw_json handling is needed here.
+DEFAULT_LOVELACE_TEMPLATE_HOURLY_FORECAST = """{% set entries = forecast %}
+{% if entries %}
+{% set max_v = ([entries | map(attribute='value') | max, 1] | max) %}
+{% set blocks = ['▁','▂','▃','▄','▅','▆','▇','█'] %}
+{% set ns = namespace(bars='') %}
+{% for e in entries %}{% set idx = ((e.value / max_v) * (blocks | length - 1)) | round(0, 'floor') | int %}{% set ns.bars = ns.bars ~ blocks[idx] %}{% endfor %}
+{% set peak = entries | max(attribute='value') %}
+{% set next24_w = entries[:24] | map(attribute='value') | sum %}
+{% set total48_w = entries | map(attribute='value') | sum %}
+## ☀️ 48h Hourly Forecast
+
+[More help and setup notes](__HELP_URL__)
+
+`{{ ns.bars }}`
+{{ entries[0].start[:10] }} {{ entries[0].start[11:16] }} → {{ entries[-1].start[:10] }} {{ entries[-1].start[11:16] }}
+
+**Peak** {{ peak.value }} W at {{ peak.start[11:16] }} on {{ peak.start[:10] }} · **Next 24h** {{ (next24_w / 1000) | round(2) }} kWh · **48h total** {{ (total48_w / 1000) | round(2) }} kWh
+{% else %}
+_No hourly forecast data yet._
+{% endif %}""".replace("__HELP_URL__", HELP_URL)
+
+# CSS bar-chart variant of the card above, for use with the HACS "HTML Jinja2
+# Template card" (custom:html-template-card), which assigns rendered content via
+# innerHTML rather than sanitizing it like the built-in markdown card — so <style>
+# and inline style="" survive (though <script> would not: browsers never execute
+# script elements inserted via innerHTML, which is fine here since no script is
+# used). Colors use Home Assistant's own theme custom properties so the chart
+# follows the dashboard's light/dark theme automatically. Note: this card renders
+# without a Shadow DOM, so the <style> block below is NOT scoped to this card —
+# it applies document-wide, which is why the pvhf- prefix exists (to avoid
+# colliding with unrelated dashboard styles), not to imply the rules are isolated.
+DEFAULT_HTML_TEMPLATE_HOURLY_FORECAST = """{% set entries = forecast %}
+{% if entries %}
+{% set max_v = ([entries | map(attribute='value') | max, 1] | max) %}
+{% set peak = entries | max(attribute='value') %}
+{% set next24_w = entries[:24] | map(attribute='value') | sum %}
+{% set total48_w = entries | map(attribute='value') | sum %}
+<style>
+  .pvhf-hourly { font-family: inherit; }
+  .pvhf-hourly .pvhf-stats { display: flex; gap: 16px; flex-wrap: wrap; margin-bottom: 10px; font-size: 0.85em; color: var(--secondary-text-color); }
+  .pvhf-hourly .pvhf-stats b { color: var(--primary-text-color); }
+  .pvhf-hourly .pvhf-chart { display: flex; align-items: flex-end; height: 90px; gap: 2px; border-bottom: 1px solid var(--divider-color, #444); }
+  .pvhf-hourly .pvhf-bar { flex: 1; min-width: 2px; background: var(--primary-color); border-radius: 2px 2px 0 0; opacity: 0.85; }
+  .pvhf-hourly .pvhf-bar.pvhf-daybreak { border-left: 1px dashed var(--divider-color, #888); }
+  .pvhf-hourly .pvhf-axis { display: flex; gap: 2px; margin-top: 2px; }
+  .pvhf-hourly .pvhf-axis span { flex: 1; font-size: 0.65em; color: var(--secondary-text-color); text-align: center; white-space: nowrap; overflow: hidden; }
+</style>
+<div class="pvhf-hourly">
+<div class="pvhf-stats">
+<span><b>{{ (next24_w / 1000) | round(2) }} kWh</b> next 24h</span>
+<span><b>{{ (total48_w / 1000) | round(2) }} kWh</b> 48h total</span>
+<span><b>{{ peak.value }} W</b> peak, {{ peak.start[11:16] }} {{ peak.start[:10] }}</span>
+</div>
+<div class="pvhf-chart">{% for e in entries %}<div class="pvhf-bar{{ ' pvhf-daybreak' if e.start[11:16] == '00:00' else '' }}" style="height: {{ ((e.value / max_v) * 100) | round(1) }}%" title="{{ e.start[11:16] }} {{ e.start[:10] }}: {{ e.value }} W"></div>{% endfor %}</div>
+<div class="pvhf-axis">{% for e in entries %}<span>{{ e.start[11:16] if loop.index0 % 6 == 0 else '' }}</span>{% endfor %}</div>
+</div>
+{% else %}
+<div class="pvhf-hourly">No hourly forecast data yet.</div>
+{% endif %}"""

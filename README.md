@@ -97,6 +97,25 @@ content: >-
   Forecast total for today: <b><big>{{ states.sensor.pv_hist_today.state | round(2)}} kWh</big></b>
 ```
 
+Want the 48-hour hourly shape instead (e.g. to sanity-check what `sensor.pv_hist_hourly_forecast` is feeding to evcc or another consumer)? `sensor.pv_hist_hourly_forecast` renders its own sparkline card the same way:
+```yaml
+type: markdown
+content: >-
+  {{ state_attr('sensor.pv_hist_hourly_forecast', 'lovelace_card_hourly_forecast') }}
+```
+This is a plain-text/unicode sparkline (no HACS card required), so it works in any Markdown card out of the box.
+
+For an actual bar chart, `sensor.pv_hist_hourly_forecast` also renders a CSS bar-chart version into a second attribute, `html_card_hourly_forecast`, meant for [html-template-card](https://github.com/PiotrMachowski/Home-Assistant-Lovelace-HTML-Jinja2-Template-card) (install via HACS first — this is a separate, third-party card, not the built-in Markdown card, since Markdown strips `style`/`class`):
+```yaml
+type: custom:html-template-card
+ignore_line_breaks: true
+content: >-
+  {{ state_attr('sensor.pv_hist_hourly_forecast', 'html_card_hourly_forecast') }}
+```
+`ignore_line_breaks: true` is required — without it the card turns every newline in the rendered HTML into a `<br>`, which breaks the chart's layout. The bars use Home Assistant's own theme colors (`--primary-color`, `--secondary-text-color`, etc.), so light/dark mode is handled automatically; hovering a bar shows its hour and watt value via the native browser tooltip.
+
+If you'd rather have a fully interactive chart (zoom, legend, etc.), [apexcharts-card](https://github.com/RomRider/apexcharts-card) can also point its `data_generator` at the same `forecast` attribute.
+
 If you are not using the default prefix, you will need to adjust the names.
 
 <table><tr>

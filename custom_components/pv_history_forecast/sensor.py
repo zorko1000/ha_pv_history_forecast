@@ -55,6 +55,8 @@ from .const import (
     DEFAULT_VALUE_TEMPLATE_DAY_AFTER_TOMORROW,
     DEFAULT_LOVELACE_TEMPLATE_REMAINING_TODAY,
     DEFAULT_LOVELACE_TEMPLATE_TOMORROW,
+    DEFAULT_LOVELACE_TEMPLATE_HOURLY_FORECAST,
+    DEFAULT_HTML_TEMPLATE_HOURLY_FORECAST,
     DEFAULT_SQL_QUERY,
     DEFAULT_UNIT_OF_MEASUREMENT,
     DEFAULT_DEVICE_CLASS,
@@ -2895,6 +2897,8 @@ class HourlyForecastSensor(SensorEntity):
         self._used_day2_fallback = False
         self._generated_at: str | None = None
         self._last_update_time: datetime | None = None
+        self._lovelace_card_hourly_forecast: str | None = None
+        self._html_card_hourly_forecast: str | None = None
         self.entity_id = generate_entity_id("sensor.{}", name, hass=hass)
 
     @staticmethod
@@ -3096,6 +3100,24 @@ class HourlyForecastSensor(SensorEntity):
         self._attr_native_value = round(sum(e["value"] for e in entries[:24]) / 1000.0, 2)
         self._attr_available = True
 
+        try:
+            tmpl = Template(DEFAULT_LOVELACE_TEMPLATE_HOURLY_FORECAST, self.hass)
+            self._lovelace_card_hourly_forecast = str(
+                tmpl.async_render({"forecast": entries})
+            )
+        except Exception as lovelace_err:  # noqa: BLE001
+            _LOGGER.error("Failed to render lovelace_card_hourly_forecast: %s", lovelace_err)
+            self._lovelace_card_hourly_forecast = None
+
+        try:
+            html_tmpl = Template(DEFAULT_HTML_TEMPLATE_HOURLY_FORECAST, self.hass)
+            self._html_card_hourly_forecast = str(
+                html_tmpl.async_render({"forecast": entries})
+            )
+        except Exception as html_err:  # noqa: BLE001
+            _LOGGER.error("Failed to render html_card_hourly_forecast: %s", html_err)
+            self._html_card_hourly_forecast = None
+
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
         """Expose the hourly series (Watts) for consumption by external tools."""
@@ -3104,6 +3126,8 @@ class HourlyForecastSensor(SensorEntity):
             "forecast_unit": "W",
             "generated_at": self._generated_at,
             "day_after_tomorrow_is_fallback": self._used_day2_fallback,
+            "lovelace_card_hourly_forecast": self._lovelace_card_hourly_forecast,
+            "html_card_hourly_forecast": self._html_card_hourly_forecast,
         }
 
     @property
