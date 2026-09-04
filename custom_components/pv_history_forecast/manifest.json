@@ -1,10 +1,11 @@
 {
   "domain": "pv_history_forecast",
   "name": "PV History Forecast",
-  "after_dependencies": ["recorder"],
+  "after_dependencies": ["recorder", "energy"],
   "codeowners": ["@LiBe-net"],
   "config_flow": true,
   "documentation": "https://github.com/LiBe-net/ha_pv_history_forecast",
+  "integration_type": "service",
   "iot_class": "local_polling",
   "issue_tracker": "https://github.com/LiBe-net/ha_pv_history_forecast/issues",
   "requirements": ["sqlalchemy>=1.4.0", "astral>=2.2"],

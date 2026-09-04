@@ -21,10 +21,14 @@ Run the (small) test suite:
 ```bash
 python -m unittest discover -s tests -v
 ```
-[tests/test_forecast_fields.py](tests/test_forecast_fields.py) is the only automated test. It loads
-[forecast_fields.py](custom_components/pv_history_forecast/forecast_fields.py) directly via
-`importlib.util.spec_from_file_location`, so it runs without the `homeassistant` package installed. To
-run a single test: `python -m unittest tests.test_forecast_fields.ForecastFieldsTest.test_name`.
+[tests/](tests/) holds the two automated tests, both of which load their module under test directly via
+`importlib.util.spec_from_file_location` so they run without the `homeassistant` package installed —
+keep new tests to that constraint. [test_forecast_fields.py](tests/test_forecast_fields.py) loads
+[forecast_fields.py](custom_components/pv_history_forecast/forecast_fields.py) as a plain file;
+[test_energy_platform.py](tests/test_energy_platform.py) has to register a stub package (and a stub
+`const`) in `sys.modules` first, because [energy.py](custom_components/pv_history_forecast/energy.py)
+does a relative `from .const import DOMAIN`. To run a single test:
+`python -m unittest tests.test_forecast_fields.ForecastFieldsTest.test_name`.
 
 There is no linter/formatter config in the repo. CI (GitHub Actions) runs `hacs/action` (HACS repo
 structure validation) and `home-assistant/actions/hassfest` — both cloud-side against `manifest.json`/
@@ -140,7 +144,17 @@ or the `pv_history_forecast.trigger_full_retune` / `force_retune` services (defi
   in 0.3") — check whether `async_setup_entry` still instantiates them before assuming they're live.
 - [forecast_fields.py](custom_components/pv_history_forecast/forecast_fields.py) — provider-agnostic
   alias lookup (e.g. `cloud_cover` vs `cloud_coverage` vs `clouds`) for reading weather forecast dict
-  fields across different weather integrations. The only module covered by automated tests.
+  fields across different weather integrations.
+- [energy.py](custom_components/pv_history_forecast/energy.py) — the `energy` *integration platform*, not
+  a module anything here imports: HA's energy component scans every set-up integration for a module by
+  that name and picks up its `async_get_solar_forecast`, which is what puts this integration in the
+  Energy dashboard's "Forecast production" list (Settings -> Dashboards -> Energy -> Solar panels). It
+  reads the cached series off `hass.data[DOMAIN][entry_id]["hourly_sensor"]` (published by
+  `sensor.async_setup_entry`) and reshapes it into `{"wh_hours": {iso: wh}}` — each hourly bucket's
+  average power in W is already that hour's Wh, so no unit maths is involved. It queries nothing, so
+  opening the dashboard costs no SQL run. Two things in `manifest.json` are load-bearing for this:
+  `integration_type: service` (the frontend's solar-settings dialog only lists config entries of that
+  type) and `energy` in `after_dependencies`.
 - [weather_helper.py](custom_components/pv_history_forecast/weather_helper.py) — logs a
   `configuration.yaml` template snippet as a fallback suggestion; superseded by `coordinator.py` calling
   `weather.get_forecasts` directly, likely dead/legacy code path.
