@@ -35,8 +35,19 @@ track releases, not branches), [scripts/deploy.sh](scripts/deploy.sh) exports `c
 from a given git ref via `git archive`, `scp`s it to `/config/custom_components/pv_history_forecast/`
 over SSH, then runs `ha core restart` on the target:
 ```bash
-scripts/deploy.sh [ref] [--host HOST] [--dry-run]   # ref defaults to HEAD, host to `homeassistant`
+scripts/deploy.sh [ref] [--host HOST] [--dry-run]   # ref defaults to HEAD, host to homeassistant.local
 ```
+It always connects as `-l root` regardless of `--host` or `~/.ssh/config` — HA's official "Terminal &
+SSH" add-on only accepts the `root` login (a sandboxed shell with `/config`, `/addons`, `/ssl`,
+`/backup`, `/share` mounted, not real host root), via public-key auth only. A bare IP works exactly the
+same as a configured `Host` alias since the script never relies on a `User` line in `~/.ssh/config`.
+On Windows it prefers `C:\Windows\System32\OpenSSH\ssh.exe`/`scp.exe` (checked at both the Git-Bash-style
+`/c/...` path and the WSL-style `/mnt/c/...` one) over whatever's on `PATH`, falling back to plain
+`ssh`/`scp` elsewhere — neither Git Bash's bundled OpenSSH build nor WSL's own Linux ssh resolve mDNS
+`.local` names or reach the Windows ssh-agent service the way the native client does, so a
+passphrase-protected key that works in a plain PowerShell `ssh` call can otherwise fail here with a bare
+"Permission denied (publickey)" or hostname-resolution error, no passphrase prompt shown.
+
 It only ships committed state (uncommitted changes are never included) and only checks the ref against
 your local working tree — it has no idea what's actually installed on the target, so it can't catch a
 regression against what's live. See the script's own header comment for that caveat.

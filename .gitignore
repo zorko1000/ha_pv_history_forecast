@@ -40,3 +40,4 @@ sql_integration_query_tests/*
 parameters-owm.txt
 parameters.txt
 retune_template_sensors.yaml
+.deploy-tmp/
