@@ -26,6 +26,23 @@ forecast:
 ```
 
 
+## Configure as Home Assistant Energy dashboard forecast ##
+
+The integration registers itself as a **solar production forecast provider** for
+Home Assistant's built-in Energy dashboard, so the forecast line on the *Solar
+production* card can come from your own history instead of Forecast.Solar - no
+need to enter the geometry (azimuth, tilt, kWp) of your installation anywhere.
+
+Set it up under **Settings -> Dashboards -> Energy -> Solar panels** (edit your
+solar source), switch *Forecast production* on, and tick **PV History
+Forecast**.
+
+The values served there are the same 48h series as
+`sensor.<prefix>_hourly_forecast`, converted from W per hourly bucket to the Wh
+per hour the dashboard expects. Note that the series starts at the *current*
+hour: today's earlier hours have no forecast line, because the underlying
+forecast is "remaining production from now to sunset", not a full-day curve.
+
 
 # PV History Forecast 
 

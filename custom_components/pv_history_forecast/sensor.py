@@ -450,6 +450,9 @@ async def async_setup_entry(
         day_after_tomorrow_entity_id=f"sensor.{prefix}_day_after_tomorrow",
         coordinator=coordinator,
     )
+    # Published for energy.py: the Energy dashboard forecast platform reads this
+    # sensor's cached series instead of recomputing or re-querying anything.
+    hass.data[DOMAIN][config_entry.entry_id]["hourly_sensor"] = hourly_sensor
 
     entities = [
         sql_sensor,
@@ -3117,6 +3120,11 @@ class HourlyForecastSensor(SensorEntity):
         except Exception as html_err:  # noqa: BLE001
             _LOGGER.error("Failed to render html_card_hourly_forecast: %s", html_err)
             self._html_card_hourly_forecast = None
+
+    @property
+    def forecast_entries(self) -> list[dict[str, Any]]:
+        """The hourly buckets, same list as the ``forecast`` state attribute."""
+        return self._forecast_entries
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
