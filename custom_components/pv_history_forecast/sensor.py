@@ -416,6 +416,12 @@ async def async_setup_entry(
         value_template=DEFAULT_VALUE_TEMPLATE_TOMORROW,
         no_ema=True,
     )
+    today_sensor = TodaySensor(
+        hass=hass,
+        config_entry=config_entry,
+        main_entity_id=main_entity_id,
+        name=f"{prefix}_today",
+    )
     day_after_tomorrow_sensor = PVForecastTemplateSensor(
         hass=hass,
         config_entry=config_entry,
@@ -447,6 +453,7 @@ async def async_setup_entry(
         sql_sensor,
         min_sensor,
         max_sensor,
+        today_sensor,
         tomorrow_sensor,
         day_after_tomorrow_sensor,
         hourly_sensor,
@@ -2109,6 +2116,103 @@ class PVForecastTemplateSensor(SensorEntity, RestoreEntity):
     @property
     def update_interval(self) -> timedelta | None:
         return timedelta(minutes=15)
+
+
+class TodaySensor(SensorEntity, RestoreEntity):
+    """Today's total PV yield: actual production so far + remaining forecast.
+
+    Adds sensor.<prefix>_remaining_today (today's not-yet-produced forecast) to
+    the day's actual production already recorded for the configured PV
+    sensor(s) — the same figure the HA Energy dashboard shows — so dashboards
+    (e.g. clock-pv-forecast-card) get a single, consistent "kWh for today"
+    sensor with the same shape as sensor.<prefix>_tomorrow. The actual-yield
+    figure is read from the main sensor's cached ``today_actual`` /
+    ``live_hour_delta`` JSON fields, so no extra SQL query is needed here.
+    """
+
+    _attr_icon = "mdi:solar-power"
+    _attr_native_unit_of_measurement = "kWh"
+    _attr_device_class = "energy"
+    _attr_state_class = None
+
+    _UPDATE_THROTTLE = timedelta(minutes=5)
+
+    def __init__(
+        self,
+        hass: HomeAssistant,
+        config_entry: ConfigEntry,
+        main_entity_id: str,
+        name: str,
+    ) -> None:
+        """Initialize the sensor."""
+        self.hass = hass
+        self.config_entry = config_entry
+        self._main_entity_id = main_entity_id
+        self._attr_name = name
+        self._attr_unique_id = f"{DOMAIN}_{config_entry.entry_id}_{name}"
+        self._attr_native_value = None
+        self._attr_available = False
+        self._actual_today: float | None = None
+        self._remaining_today: float | None = None
+        self._last_update_time: datetime | None = None
+        self.entity_id = generate_entity_id("sensor.{}", name, hass=hass)
+
+    async def async_added_to_hass(self) -> None:
+        """Restore last known value so reboot gaps don't flip to unavailable."""
+        await super().async_added_to_hass()
+        last_state = await self.async_get_last_state()
+        if last_state is None or last_state.state in ("unknown", "unavailable", "", None):
+            return
+        try:
+            self._attr_native_value = float(last_state.state)
+            self._attr_available = True
+        except (TypeError, ValueError):
+            pass
+
+    async def async_update(self) -> None:
+        """Recompute today's total from the main sensor's state + cached JSON."""
+        now = datetime.now()
+        if (
+            self._last_update_time is not None
+            and (now - self._last_update_time) < self._UPDATE_THROTTLE
+        ):
+            return
+        self._last_update_time = now
+
+        main_state = self.hass.states.get(self._main_entity_id)
+        if main_state is None or main_state.state in ("unknown", "unavailable", ""):
+            self._attr_available = self._attr_native_value is not None
+            return
+        try:
+            remaining_today = float(main_state.state)
+        except (TypeError, ValueError):
+            self._attr_available = self._attr_native_value is not None
+            return
+
+        actual_today = 0.0
+        raw_json = main_state.attributes.get("json")
+        if raw_json:
+            try:
+                parsed = json.loads(raw_json)
+                if isinstance(parsed, dict):
+                    actual_today = float(parsed.get("today_actual") or 0.0) + float(
+                        parsed.get("live_hour_delta") or 0.0
+                    )
+            except (TypeError, ValueError):
+                actual_today = 0.0
+
+        self._actual_today = round(actual_today, 2)
+        self._remaining_today = remaining_today
+        self._attr_native_value = round(actual_today + remaining_today, 2)
+        self._attr_available = True
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        """Expose the actual/remaining split for debugging and dashboards."""
+        return {
+            "pv_actual_today": self._actual_today,
+            "pv_remaining_today": self._remaining_today,
+        }
 
 
 class ForecastMethodSensor(SensorEntity, RestoreEntity):

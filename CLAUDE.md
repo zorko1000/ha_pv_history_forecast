@@ -74,6 +74,13 @@ Sibling derived sensors `_remaining_today_min` / `_remaining_today_max` (pessimi
 follow the same derived-sensor pattern with their own templates and EMA (min has
 `prevent_ema_increase=True` so it never jumps up between smoothing steps).
 
+- **`sensor.<prefix>_today`** — `TodaySensor` in sensor.py. Not a template-derived sensor: it just adds
+  the main sensor's own state (remaining forecast) to `today_actual` + `live_hour_delta`, two fields
+  `DEFAULT_SQL_QUERY` writes into the cached `json` blob (`today_actual` is `pv_daily_totals.pv_yield_total`
+  for today — the same statistics-based actual yield the query already computes for historical days, just
+  not filtered out for "today" like `daily_summary` is). Gives a single "kWh so far + forecast" figure for
+  today with the same shape as `_tomorrow`, for dashboards that want one consistent sensor per day.
+
 ### Self-tuning ("retune")
 
 `SQLPVForecastSensor` can nightly (00:10 local time) re-search the template's weighting parameters
