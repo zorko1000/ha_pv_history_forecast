@@ -82,6 +82,8 @@ or:
 3. Install **PV History Forecast** and restart Home Assistant
 4. **Settings → Devices & Services** → Add **PV History Forecast**
 
+
+Consider supporting the creator of the base integration:
 <br><a href="https://www.buymeacoffee.com/libe.net" rel="nofollow">
   <img src="https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png" alt="Buy Me a Coffee" style="height: 60px !important; width: 217px !important; max-width: 100%;">
 </a><br>
